@@ -1,14 +1,25 @@
 #include "MyStrategy.h"
 #include <algorithm>
 
+#define SHOOT
+#define PICKUP_BONUSES
+#define USE_NITRO
+#define SPILL_OIL
+
+#define SPLIT_WITH_CIRCLES
+//#define USE_MIN_RADIUS
+
 #define PI 3.14159265358979323846
 #define EPS 0.01
 #define DIRECTION_EPS 0.05
 #define OFFSET 0.1
 #define _USE_MATH_DEFINES
-#define SAFE 140
+#define SAFE 150
+#define N_OF_TRAJECTORY_LOOKEHEAD_TILES 7
 #define OPTIMIZATION_STEP 0.05
 #define SMOOTHING_ITERATIONS 500
+#define MIN_RADIUS 600
+#define MIN_RADIUS_MULTIPLIER 2
 #define BONUS_PICKUP_START_ITERATION 250
 #define N_OF_LOOKAHEAD_TILES 11
 #define LOOKAHEAD_WAYPOINT_INDEX 2
@@ -36,34 +47,35 @@
 #define SPEED_THRESHOLD 3
 #define SPEED_MULTIPLIER 50
 #define MIN_DISTANCE_BETWEEN_LINKS 70
-#define LOOKBACK_STEP_FOR_RACE_LINE_OPTIMIZATION 15
+#define LOOKBACK_STEP_FOR_RACE_LINE_OPTIMIZATION 40
 #define TILES_HISTORY_SIZE 4
-#define MAX_TICKS_BETWEEN_PATH_UPDATES 50
+#define MAX_TICKS_BETWEEN_PATH_UPDATES 10
 #define MAX_VELOCITY 150
-#define PATHFINDING_BRUTEFORCE_DEPTH 11
+#define PATHFINDING_BRUTEFORCE_DEPTH 10
+#define ADDITIONAL_WAYPOINT_LOOKAHEAD 2
 #define START_NITRO_LOOKAHEAD 100
 
 #define TILE_WEIGHT 10
 #define WAYPOINT_BONUS 20
-#define SHARP_TURN_PENALTY 50
+#define SHARP_TURN_PENALTY 30
 //#define STRAIGHT_BONUS 3
 //#define LEFT_RIGHT_BONUS 5
 #define STRAIGHT_BONUS 10
 #define LEFT_RIGHT_BONUS 12
 #define TURNAROUND_PENALTY 150
 #define SAME_DIRECTION_BONUS 10
-#define HAS_PURE_SCORE 55
+#define HAS_PURE_SCORE 40
 #define HAS_HP 25
-#define HAS_NITRO 35
+#define HAS_NITRO 30
 #define HAS_OIL 15
 #define HAS_PROJECTILE 15
-#define CHANGED_MIND_PENALTY 10
+#define CHANGED_MIND_PENALTY 20
 #define STRAIGHT_START_BONUS 10
-#define STRAGHT_START_LENGTH 100
+#define STRAGHT_START_LENGTH 3
 
 #define PICKUP_DIST_TO_BONUS 250
 #define BONUS_PICKUP_WIDTH 250
-#define BONUS_PICUP_INNER_RADIUS 200
+#define BONUS_PICKUP_INNER_RADIUS 200
 #define BONUS_PICKUP_OUTER_RADIUS 500
 
 #define REPAIR_MASS 40
@@ -80,10 +92,11 @@ using namespace std;
 
 
 ChainLine::ChainLine(MyStrategy &strategy, const vector<intPoint> &tiles) : strategy(strategy), currentPosIndex(0) {
-	links.resize(tiles.size());
-	fixed.resize(tiles.size());
-	masses.resize(tiles.size());
-	for (int i = 0; i < tiles.size(); i++) {
+	int size = N_OF_TRAJECTORY_LOOKEHEAD_TILES < tiles.size() ? N_OF_TRAJECTORY_LOOKEHEAD_TILES : tiles.size();
+	links.resize(size);
+	fixed.resize(size);
+	masses.resize(size);
+	for (int i = 0; i < size; i++) {
 		doublePoint newLink;
 		links[i].x = (tiles[i].x + (double)0.5)*strategy.getGame().getTrackTileSize();
 		links[i].y = (tiles[i].y + (double)0.5)*strategy.getGame().getTrackTileSize();
@@ -145,6 +158,47 @@ void ChainLine::split() {
 		newMasses.push_back(masses[i]);
 		if (i == currentPosIndex)
 			newCurrentPosIndex = newLinks.size() - 1;
+#ifdef SPLIT_WITH_CIRCLES
+		if (i < links.size() - 2) {
+			doublePoint a, b, c;
+			a = links[i];
+			b = links[i + 1];
+			c = links[i + 2];
+			if (i != currentPosIndex || fabs(fabs(b.angle(a, c)) - PI) < DIRECTION_EPS) {
+				doublePoint newLink = doublePoint::middle(links[i], links[i + 1]);
+				double mass = (masses[i] + masses[i + 1]) / 2;
+				newLinks.push_back(newLink);
+				newFixed.push_back(false);
+				newMasses.push_back(mass);
+			}
+			else {
+				double d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+				doublePoint u;
+				u.x = ((a.x * a.x + a.y * a.y) * (b.y - c.y) + (b.x * b.x + b.y * b.y) * (c.y - a.y) + (c.x * c.x + c.y * c.y) * (a.y - b.y)) / d;
+				u.y = ((a.x * a.x + a.y * a.y) * (c.x - b.x) + (b.x * b.x + b.y * b.y) * (a.x - c.x) + (c.x * c.x + c.y * c.y) * (b.x - a.x)) / d;
+				double r = a.length(u);
+				doublePoint midPoint;
+				midPoint = (a + b) / 2;
+				double angleToNewPoint = u.angle(midPoint);
+				doublePoint newLink;
+				newLink.x = u.x + r * cos(angleToNewPoint);
+				newLink.y = u.y + r * sin(angleToNewPoint);
+				double mass = (masses[i] + masses[i + 1]) / 2;
+				newLinks.push_back(newLink);
+				newFixed.push_back(false);
+				newMasses.push_back(mass);
+				/*#ifdef PRINT_DEBUG
+								strategy.debug.beginPre();
+								strategy.debug.circle(u.x, u.y, r, 0xFF0000);
+								strategy.debug.line(u.x, u.y, a.x, a.y, 0xFF0000);
+								strategy.debug.line(u.x, u.y, b.x, b.y, 0x00FF00);
+								strategy.debug.line(u.x, u.y, c.x, c.y, 0x000000);
+								strategy.debug.line(u.x, u.y, newLink.x, newLink.y, 0x0000FF);
+								strategy.debug.endPre();
+				#endif // DEBUG*/
+			}
+		}
+#else
 		if (i < links.size() - 1) {
 			doublePoint newLink = doublePoint::middle(links[i], links[i + 1]);
 			double mass = (masses[i] + masses[i + 1]) / 2;
@@ -152,6 +206,7 @@ void ChainLine::split() {
 			newFixed.push_back(false);
 			newMasses.push_back(mass);
 		}
+#endif
 	}
 
 	links = newLinks;
@@ -212,6 +267,16 @@ void ChainLine::optimizeLine()
 	force.resize(links.size());
 	velocity.resize(links.size());
 	spring.resize(links.size() - 1);
+
+#ifdef PRINT_DEBUG
+	strategy.debug.beginPre();
+	for (int i = 0; i < links.size(); i++) {
+		if (i != 0) {
+			strategy.debug.line(links[i].x, links[i].y, links[i - 1].x, links[i - 1].y, 0x000000);
+		}
+		strategy.debug.fillCircle(links[i].x, links[i].y, 10, 0x000000);
+	}
+#endif
 
 	for (int i = 0; i < velocity.size(); i++)
 	{
@@ -276,16 +341,22 @@ void ChainLine::optimizeLine()
 			double relativeAngleTo = middle.angle(start, end);
 
 			//if (!(fabs(fabs(relativeAngleTo) - PI) < PI / 30)) {
-			double multiplier = relativeAngleTo > 0 ? PI - relativeAngleTo : -PI - relativeAngleTo;
-			doublePoint springNormal1;
-			doublePoint springNormal2;
-			springNormal1.x = -(middle.y - start.y);
-			springNormal1.y = (middle.x - start.x);
-			springNormal2.x = -(end.y - middle.y);
-			springNormal2.y = (end.x - middle.x);
-			force[i - 1] = force[i - 1] - multiplier * springNormal1;
-			force[i] = force[i] + multiplier * (springNormal2 + springNormal1);
-			force[i + 1] = force[i + 1] - multiplier*springNormal2;
+				double multiplier = relativeAngleTo > 0 ? PI - relativeAngleTo : -PI - relativeAngleTo;
+				doublePoint springNormal1;
+				doublePoint springNormal2;
+#ifdef USE_MIN_RADIUS
+				double radius = curvatureRadius(start, middle, end);
+				double radiusMultiplier = radius < MIN_RADIUS ? MIN_RADIUS_MULTIPLIER : fmin(MIN_RADIUS_MULTIPLIER * MIN_RADIUS / radius, 1);
+#else
+				double radiusMultiplier = 1;
+#endif
+				springNormal1.x = -(middle.y - start.y);
+				springNormal1.y = (middle.x - start.x);
+				springNormal2.x = -(end.y - middle.y);
+				springNormal2.y = (end.x - middle.x);
+				force[i - 1] = force[i - 1] - radiusMultiplier * multiplier * springNormal1;
+				force[i] = force[i] + radiusMultiplier * multiplier * (springNormal2 + springNormal1);
+				force[i + 1] = force[i + 1] - radiusMultiplier * multiplier*springNormal2;
 			//}
 
 			/* if (iteration == BONUS_PICKUP_START_ITERATION && masses[i] == 1 && !fixed[i] && i > currentPosIndex) {
@@ -313,6 +384,7 @@ void ChainLine::optimizeLine()
 			} */
 		}		
 
+#ifdef PICKUP_BONUSES
 		if (iteration == BONUS_PICKUP_START_ITERATION) {
 			for (int i = currentPosIndex + 1; i < links.size(); i++) {
 				int x, y;
@@ -428,6 +500,7 @@ void ChainLine::optimizeLine()
 				}
 			}
 		}	
+#endif
 
 		double maxForce = 0;
 		/* for (int i = 1; i < force.size(); i++) {
@@ -450,7 +523,7 @@ void ChainLine::optimizeLine()
 		}
 		//}
 		for (int i = 0; i < links.size(); i++) {
-			if (strategy.isOnTrack(links[i] + velocity[i])) {
+			if (strategy.isOnTrack(links[i] + velocity[i]) && strategy.isOnPath(links[i] + velocity[i])) {
 				links[i] = links[i] + velocity[i];
 			}
 			else {
@@ -462,9 +535,11 @@ void ChainLine::optimizeLine()
 #ifdef PRINT_DEBUG
 	strategy.debug.beginPost();
 	for (int i = 0; i < links.size(); i++) {
+		if (i != 0) {
+			strategy.debug.line(links[i].x, links[i].y, links[i - 1].x, links[i - 1].y, 0xFF0000);
+		}
 		strategy.debug.fillCircle(links[i].x, links[i].y, 10, 0xFF0000);		
-	}	
-	strategy.debug.endPost();
+	}
 #endif
 
 	for (int i = 1; i < links.size() - 1; i++) {
@@ -486,12 +561,12 @@ void ChainLine::optimizeLine()
 				links[i] = newPoint;
 			}
 		}
-#ifdef PRINT_DEBUG
+/*#ifdef PRINT_DEBUG
 		if (masses[i] > 1)
 			strategy.debug.fillCircle(links[i].x, links[i].y, 20, 0xFF0000);
 		else
-			strategy.debug.fillCircle(links[i].x, links[i].y, 10, 0x000000);
-#endif
+			strategys.debug.fillCircle(links[i].x, links[i].y, 10, 0x000000);
+#endif*/
 	}
 #ifdef PRINT_DEBUG
 	//strategy.debug.endPost();
@@ -515,6 +590,8 @@ void MyStrategy::move(const Car& self, const World& world, const Game& game, Mov
 		}
 	}
 
+	runPathfinding();
+
 	if (world_ptr->getTick() < game_ptr->getInitialFreezeDurationTicks()) {
 		move.setEnginePower(1);
 		return;
@@ -526,7 +603,6 @@ void MyStrategy::move(const Car& self, const World& world, const Game& game, Mov
 	currentTile.y = self_ptr->getY() / game_ptr->getTrackTileSize();
 
 	if (!(currentTile == previousTiles.back())) {
-		runPathfinding();
 		if (std::find(previousTiles.begin(), previousTiles.end(), currentTile) != previousTiles.end()) {
 			previousTiles.clear();
 		}
@@ -537,9 +613,11 @@ void MyStrategy::move(const Car& self, const World& world, const Game& game, Mov
 		updatePath(true);
 	}
 
+#ifdef SHOOT
 	if (canShoot()) {
 		move.setThrowProjectile(true);
 	}
+#endif
 
 	if (recoveryMode) {
 		if (world_ptr->getTick() - recoveryModeStartTick < RECOVERY_TICKS) {
@@ -633,7 +711,7 @@ void MyStrategy::move(const Car& self, const World& world, const Game& game, Mov
 	else {
 #ifdef PRINT_DEBUG
 		char *buf = new char[Debug::BUF_SIZE];
-		sprintf(buf, "\"%lf %lf\"", centrifugalAcceleration, minCurvature[BRAKE_CURVATURE_LOOKAHEAD]);
+		sprintf(buf, "\"%lf %lf %lf\"", speedModule, centrifugalAcceleration, minCurvature[BRAKE_CURVATURE_LOOKAHEAD]);
 		debug.text(self.getX(),self.getY() + 100, buf, 0);
 		delete buf;
 		debug.endPost();
@@ -649,15 +727,19 @@ void MyStrategy::move(const Car& self, const World& world, const Game& game, Mov
 		}
 	}
 
-	if (minCurvature[NITRO_CURVATURE_LOOKAHEAD] > 4000) {		
+#ifdef USE_NITRO
+	if (minCurvature[NITRO_CURVATURE_LOOKAHEAD] > 4000) {
 		move.setUseNitro(true);
-	}	
+	}
+#endif
 
+#ifdef SPILL_OIL
 	if (move_ptr->isBrake()) {
 		if (spillOil()) {
 			move.setSpillOil(true);
 		}
 	}
+#endif
 
 	/* if (world_ptr->getTick() == game_ptr->getInitialFreezeDurationTicks()) {
 		bool useNitroOnStart = true;
@@ -1016,16 +1098,14 @@ doublePoint MyStrategy::getNextWaypoint() {
 		speedVector.y = self_ptr->getSpeedY();
 		double speedAngle = atan2(speedVector.y, speedVector.x);
 		doublePoint newLink;
-		if (posOnPrevTicks.size() < LOOKBACK_STEP_FOR_RACE_LINE_OPTIMIZATION || speedVector.length() < 2) {
+		if (posOnPrevTicks.size() <= LOOKBACK_STEP_FOR_RACE_LINE_OPTIMIZATION || speedVector.length() < 2) {
 			newLink.x = racingLine[0].x - ADDITIONAL_DIRECTION_WAYPOINT_DISTANCE * cos(self_ptr->getAngle());
 			newLink.y = racingLine[0].y - ADDITIONAL_DIRECTION_WAYPOINT_DISTANCE * sin(self_ptr->getAngle());
 			racingLine.insertPoint(newLink, 0, true);
 		}
-		else {
-			for (int i = LOOKBACK_STEP_FOR_RACE_LINE_OPTIMIZATION; i < posOnPrevTicks.size(); i += LOOKBACK_STEP_FOR_RACE_LINE_OPTIMIZATION) {
-				newLink = posOnPrevTicks[i];
-				racingLine.insertPoint(newLink, 0, true);
-			}			
+		else if (posOnPrevTicks.size() > LOOKBACK_STEP_FOR_RACE_LINE_OPTIMIZATION) {
+			newLink = posOnPrevTicks[LOOKBACK_STEP_FOR_RACE_LINE_OPTIMIZATION];
+			racingLine.insertPoint(newLink, 0, true);
 		}
 		/*if (speedVector.length() > SPEED_THRESHOLD) {
 			newLink.x = racingLine[0].x - fmin(speedVector.length() * SPEED_MULTIPLIER, ADDITIONAL_DIRECTION_WAYPOINT_DISTANCE) * cos(speedAngle);
@@ -1155,6 +1235,17 @@ bool MyStrategy::isOnTrack(doublePoint point) const{
 	return result;
 }
 
+bool MyStrategy::isOnPath(doublePoint point) const {
+	int x = point.x / game_ptr->getTrackTileSize();
+	int y = point.y / game_ptr->getTrackTileSize();
+	for (int i = 0; i < N_OF_TRAJECTORY_LOOKEHEAD_TILES; i++) {
+		if (currentPath[i].x == x && currentPath[i].y == y) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void MyStrategy::initPrevTiles() {
 	intPoint currentTile;
 	currentTile.x = self_ptr->getX() / game_ptr->getTrackTileSize();
@@ -1236,7 +1327,7 @@ void MyStrategy::updatePath(bool force) {
 	currentPath = possiblePaths[bestIndex];
 	w = (w + nOfCheckpointsVisited[bestIndex]) % world_ptr->getWaypoints().size();
 
-#ifdef PRINT_DEBUG
+/*#ifdef PRINT_DEBUG
 	debug.beginPre();
 	for (int i = 1; i < currentPath.size() - 1; i++) {
 		doublePoint begin, middle, end;
@@ -1256,7 +1347,7 @@ void MyStrategy::updatePath(bool force) {
 			doublePoint centre = doublePoint::middle(begin, end);
 			double radius = game_ptr->getTrackTileSize() / 2;
 			debug.circle(centre.x, centre.y, BONUS_PICKUP_OUTER_RADIUS, 0xFF0000);
-			debug.circle(centre.x, centre.y, BONUS_PICUP_INNER_RADIUS, 0xFF0000);
+			debug.circle(centre.x, centre.y, BONUS_PICKUP_INNER_RADIUS, 0xFF0000);
 		}
 		else {
 			if (begin.x == end.x) {
@@ -1299,7 +1390,7 @@ void MyStrategy::updatePath(bool force) {
 				double radius = game_ptr->getTrackTileSize() / 2;
 				if ((bonusCoords.x - centre.x)*(bonusCoords.x - centre.x) + (bonusCoords.y - centre.y) * (bonusCoords.y - centre.y) < (BONUS_PICKUP_OUTER_RADIUS)*(BONUS_PICKUP_OUTER_RADIUS)
 					&&
-					(bonusCoords.x - centre.x)*(bonusCoords.x - centre.x) + (bonusCoords.y - centre.y) * (bonusCoords.y - centre.y) > (BONUS_PICUP_INNER_RADIUS)*(BONUS_PICUP_INNER_RADIUS)) {
+					(bonusCoords.x - centre.x)*(bonusCoords.x - centre.x) + (bonusCoords.y - centre.y) * (bonusCoords.y - centre.y) > (BONUS_PICKUP_INNER_RADIUS)*(BONUS_PICKUP_INNER_RADIUS)) {
 					onPath = true;
 				}
 			}
@@ -1320,9 +1411,9 @@ void MyStrategy::updatePath(bool force) {
 		}
 	}
 	debug.endPre();
-#endif
+#endif*/
 
-	while (currentPath.size() != N_OF_LOOKAHEAD_TILES)
+	while (currentPath.size() < N_OF_LOOKAHEAD_TILES)
 	{
 		currentTile = currentPath.back();
 		intPoint nextTile = currentTile;
@@ -1403,32 +1494,65 @@ void MyStrategy::fillPaths(vector<intPoint> &path, vector<vector<intPoint> > &pa
 	}
 }
 
-void MyStrategy::evaluatePaths(vector<vector<intPoint> > &paths, vector<int> &score, vector<int> &nOfCheckpointsVisited) {
+void MyStrategy::evaluatePaths(vector<vector<intPoint> > &paths, vector<int> &score, vector<int> &nOfWaypointsVisited) {
 	score.resize(paths.size());
-	nOfCheckpointsVisited.resize(paths.size());
-	int maxNOfCheckPointsVisited = 0;
+	nOfWaypointsVisited.resize(paths.size());
+	int maxNOfWaypointsVisited = 0;
+	int totalChecpointsToVisit = 0;
 	for (int i = 0; i < paths.size(); i++) {
 		int w = self_ptr->getNextWaypointIndex();
 		score[i] = 0;
-		nOfCheckpointsVisited[i] = 0;
-		for (int j = 1; j < paths[i].size(); j++) { 
+		nOfWaypointsVisited[i] = 0;
+		for (int j = 1; j < paths[i].size(); j++) {
 			if (world_ptr->getWaypoints()[w][0] == paths[i][j].x
 				&&
 				world_ptr->getWaypoints()[w][1] == paths[i][j].y) {
 				w = (w + 1) % world_ptr->getWaypoints().size();
-				nOfCheckpointsVisited[i]++;
+				nOfWaypointsVisited[i]++;
 			}
 			intPoint currentTile = paths[i][j];
 			intPoint prevTile = paths[i][j - 1];
-			score[i] += pathScore[w][prevTile.x][prevTile.y] - pathScore[w][currentTile.x][currentTile.y];
-
 		}
-		if (nOfCheckpointsVisited[i] > maxNOfCheckPointsVisited) {
-			maxNOfCheckPointsVisited = nOfCheckpointsVisited[i];
+		if (nOfWaypointsVisited[i] > maxNOfWaypointsVisited) {
+			maxNOfWaypointsVisited = nOfWaypointsVisited[i];
 		}
-		score[i] += nOfCheckpointsVisited[i] * WAYPOINT_BONUS;
+	}
+	totalChecpointsToVisit = maxNOfWaypointsVisited + ADDITIONAL_WAYPOINT_LOOKAHEAD;
+	int minimumLength = INT_MAX;
+	for (int i = 0; i < paths.size(); i++) {
+		int w = (self_ptr->getNextWaypointIndex() + nOfWaypointsVisited[i]) % nOfWaypoints;
+		intPoint currentTile;
+		while (nOfWaypointsVisited[i] < totalChecpointsToVisit)
+		{
+			currentTile = paths[i].back();
+			intPoint nextTile = currentTile;
 
-		/* if (world_ptr->getTick() == game_ptr->getInitialFreezeDurationTicks()) {
+			if (pathScore[w][currentTile.x][currentTile.y] == 0) {
+				w = (w + 1) % nOfWaypoints;
+				nOfWaypointsVisited[i]++;
+				continue;
+			}
+
+			if (canGo(currentTile, RIGHT) && pathScore[w][currentTile.x + 1][currentTile.y] < pathScore[w][currentTile.x][currentTile.y]) {
+				nextTile.x++;
+			}
+			else if (canGo(currentTile, LEFT) && pathScore[w][currentTile.x - 1][currentTile.y] < pathScore[w][currentTile.x][currentTile.y]) {
+				nextTile.x--;
+			}
+			else if (canGo(currentTile, UP) && pathScore[w][currentTile.x][currentTile.y - 1] < pathScore[w][currentTile.x][currentTile.y]) {
+				nextTile.y--;
+			}
+			else if (canGo(currentTile, DOWN) && pathScore[w][currentTile.x][currentTile.y + 1] < pathScore[w][currentTile.x][currentTile.y]) {
+				nextTile.y++;
+			}
+			paths[i].push_back(nextTile);
+		}
+		if (paths[i].size() < minimumLength) {
+			minimumLength = paths[i].size();
+		}
+	}
+	for (int i = 0; i < paths.size(); i++) {
+		if (world_ptr->getTick() == game_ptr->getInitialFreezeDurationTicks()) {
 			bool straightStart = true;
 			Direction currenDirection = world_ptr->getStartingDirection();
 			int deltaX = 0, deltaY = 0;
@@ -1459,15 +1583,13 @@ void MyStrategy::evaluatePaths(vector<vector<intPoint> > &paths, vector<int> &sc
 			if (straightStart) {
 				score[i] += STRAIGHT_START_BONUS;
 			}
-		} */
+		}
+		score[i] -= TILE_WEIGHT * (paths[i].size() - minimumLength);
 		doublePoint nextTile;
 		nextTile.x = paths[i][1].x * game_ptr->getTrackTileSize() + game_ptr->getTrackTileSize() / 2;
 		nextTile.y = paths[i][1].y * game_ptr->getTrackTileSize() + game_ptr->getTrackTileSize() / 2;
-		if (fabs(self_ptr->getAngleTo(nextTile.x, nextTile.y)) < PI / 18) {
+		if (fabs(self_ptr->getAngleTo(nextTile.x, nextTile.y)) < PI / 6) {
 			score[i] += SAME_DIRECTION_BONUS;
-		}
-		else {
-			score[i] += SAME_DIRECTION_BONUS * cos(self_ptr->getAngleTo(nextTile.x, nextTile.y));
 		}
 
 		if (currentPath.size() != 0)
@@ -1525,7 +1647,7 @@ void MyStrategy::evaluatePaths(vector<vector<intPoint> > &paths, vector<int> &sc
 			}
 		}
 
-		for (int j = 1; j < paths[i].size() - 1; j++) {
+		for (int j = 1; j < PATHFINDING_BRUTEFORCE_DEPTH; j++) {
 			doublePoint begin, middle, end;
 			begin.x = paths[i][j - 1].x;
 			begin.y = paths[i][j - 1].y;
@@ -1557,7 +1679,7 @@ void MyStrategy::evaluatePaths(vector<vector<intPoint> > &paths, vector<int> &sc
 					double radius = game_ptr->getTrackTileSize() / 2;
 					if ((bonusCoords.x - centre.x)*(bonusCoords.x - centre.x) + (bonusCoords.y - centre.y) * (bonusCoords.y - centre.y) < (BONUS_PICKUP_OUTER_RADIUS)*(BONUS_PICKUP_OUTER_RADIUS)
 						&&
-						(bonusCoords.x - centre.x)*(bonusCoords.x - centre.x) + (bonusCoords.y - centre.y) * (bonusCoords.y - centre.y) > (BONUS_PICUP_INNER_RADIUS)*(BONUS_PICUP_INNER_RADIUS)) {
+						(bonusCoords.x - centre.x)*(bonusCoords.x - centre.x) + (bonusCoords.y - centre.y) * (bonusCoords.y - centre.y) > (BONUS_PICKUP_INNER_RADIUS)*(BONUS_PICKUP_INNER_RADIUS)) {
 						onPath = true;
 					}
 				}

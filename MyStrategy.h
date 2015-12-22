@@ -147,6 +147,7 @@ public:
     void move(const Car& self, const World& world, const Game& game, Move& move);
 
 	bool isOnTrack(doublePoint point) const;
+	bool isOnPath(doublePoint point) const;
 
 	const Car &getSelf() { return *self_ptr; }
 	const World &getWorld() { return *world_ptr; }
